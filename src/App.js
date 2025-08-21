@@ -1,13 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, getDoc, onSnapshot, collection } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore'; // Removed 'collection' as it was unused
 
 // Main App component
 const App = () => {
   // Firebase States
   const [db, setDb] = useState(null);
-  const [auth, setAuth] = useState(null);
+  // const [auth, setAuth] = useState(null); // 'auth' was assigned but never used, removed state
   const [userId, setUserId] = useState(null);
   const [isAuthReady, setIsAuthReady] = useState(false); // To ensure Firestore operations wait for auth
 
@@ -44,7 +44,7 @@ const App = () => {
   useEffect(() => {
     const initializeFirebase = async () => {
       try {
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; // 'appId' is now used in doc path
         const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
 
         if (Object.keys(firebaseConfig).length === 0) {
@@ -54,10 +54,10 @@ const App = () => {
 
         const app = initializeApp(firebaseConfig);
         const firestoreDb = getFirestore(app);
-        const firebaseAuth = getAuth(app);
+        const firebaseAuth = getAuth(app); // Kept for sign-in, but not stored in state if unused elsewhere
 
         setDb(firestoreDb);
-        setAuth(firebaseAuth);
+        // setAuth(firebaseAuth); // Removed as it was unused
 
         // Sign in anonymously or with custom token if available
         if (typeof __initial_auth_token !== 'undefined') {
@@ -94,7 +94,8 @@ const App = () => {
       return;
     }
 
-    const userSkillsDocRef = doc(db, `artifacts/${__app_id}/users/${userId}/userSkills/whatSkills`);
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; // Ensure appId is defined for doc path
+    const userSkillsDocRef = doc(db, `artifacts/${appId}/users/${userId}/userSkills/whatSkills`);
 
     // Load skills on component mount
     const loadSkills = async () => {
@@ -107,13 +108,18 @@ const App = () => {
             // Re-populate selected broad categories from loaded data
             const loadedBroadCategories = new Set();
             Object.keys(loadedData.skills).forEach(broadCatKey => {
-                if (broadCategories.includes(broadCatKey)) {
+                if (broadCategories.includes(broadCatKey)) { // Check against the original broadCategories
                     loadedBroadCategories.add(broadCatKey);
                 } else if (broadCatKey.startsWith('Other_Custom_') || broadCatKey.startsWith('Other_Auto_')) {
                     loadedBroadCategories.add('Other'); // Ensure 'Other' checkbox is checked if custom categories exist
+                    // Also add the custom/auto-categorized broad category itself if it's not already in selectedBroadCategories
+                    if (!Array.from(selectedBroadCategories).some(c => c === broadCatKey)) {
+                        loadedBroadCategories.add(broadCatKey);
+                    }
                 }
             });
-            setSelectedBroadCategories(Array.from(loadedBroadCategories));
+            // Merge with existing selectedBroadCategories to avoid removing manually checked ones
+            setSelectedBroadCategories(prev => Array.from(new Set([...prev, ...Array.from(loadedBroadCategories)])));
           }
           console.log("Skills loaded from Firestore.");
         } else {
@@ -138,7 +144,7 @@ const App = () => {
     });
 
     return () => unsubscribe(); // Cleanup listener on component unmount
-  }, [isAuthReady, db, userId]); // Dependencies for loading/listening
+  }, [isAuthReady, db, userId, selectedBroadCategories]); // Added selectedBroadCategories to dependencies
 
   // Save skills whenever skillsByCategory changes (debounced for performance)
   useEffect(() => {
@@ -155,7 +161,8 @@ const App = () => {
     const saveSkills = async () => {
       setSavingStatus('Saving...');
       try {
-        const userSkillsDocRef = doc(db, `artifacts/${__app_id}/users/${userId}/userSkills/whatSkills`);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; // Ensure appId is defined
+        const userSkillsDocRef = doc(db, `artifacts/${appId}/users/${userId}/userSkills/whatSkills`);
         // Firestore doesn't like empty objects directly in maps for some versions,
         // so ensure sub-categories are only added if they have skills.
         const cleanedSkills = {};
@@ -246,7 +253,7 @@ const App = () => {
     };
 
     fetchSubCategories(activeBroadCategory);
-  }, [activeBroadCategory]);
+  }, [activeBroadCategory, broadCategories]); // Added broadCategories to dependencies
 
   // Effect hook to fetch specific skill suggestions when activeSubCategory changes
   useEffect(() => {
@@ -306,9 +313,13 @@ const App = () => {
   // Handler for when a broad category checkbox is changed
   const handleBroadCategoryChange = (e) => {
     const { value, checked } = e.target;
-    setSelectedBroadCategories((prev) =>
-      checked ? [...prev, value] : prev.filter((cat) => cat !== value)
-    );
+    // Check if the value is a standard broad category or 'Other' before modifying selectedBroadCategories
+    if (broadCategories.includes(value) || value === 'Other') {
+        setSelectedBroadCategories((prev) =>
+            checked ? [...prev, value] : prev.filter((cat) => cat !== value)
+        );
+    }
+
 
     // When a category is unchecked, clear its associated skills and selections
     if (!checked) {
@@ -317,7 +328,10 @@ const App = () => {
         delete newState[value];
         // Also remove any custom categories associated with this broad category if unchecked
         Object.keys(newState).forEach(key => {
-            if (key.startsWith(`Other_Custom_`) && key.includes(`__${value}`)) {
+            if (key.startsWith(`Other_Custom_`) && key.includes(`__${value}`)) { // Adjusted to handle potential naming conventions
+                delete newState[key];
+            }
+             if (key.startsWith(`Other_Auto_`) && key.includes(`__${value}`)) { // Adjusted to handle potential naming conventions
                 delete newState[key];
             }
         });
@@ -366,14 +380,17 @@ const App = () => {
 
     // Handle 'Other' broad category with custom name
     if (activeBroadCategory === 'Other' && newCustomBroadCategory.trim() !== '') {
-        targetBroadCategory = newCustomBroadCategory.trim();
+        targetBroadCategory = `Other_Custom_${newCustomBroadCategory.trim()}`; // Use unique prefix for custom broad categories
         // If it's a new custom broad category, we need a default sub-category or prompt for one.
-        // For simplicity, let's use a generic sub-category for now.
-        targetSubCategory = 'General'; // Or prompt user for custom sub-category name
+        targetSubCategory = 'General';
+         if (!selectedBroadCategories.includes(targetBroadCategory)) {
+            setSelectedBroadCategories(prev => [...prev, targetBroadCategory]);
+        }
     }
 
     // Auto-categorize if no broad or sub-category is selected for the input skill
-    if ((!targetBroadCategory || !targetSubCategory) && newSkillInput.trim() !== '') {
+    // and if the input skill is not empty
+    if ((!targetBroadCategory || !targetSubCategory || targetBroadCategory === 'Other') && newSkillInput.trim() !== '' && !loadingAutoCategorization) {
         setLoadingAutoCategorization(true);
         let attempts = 0;
         const maxAttempts = 5;
@@ -381,7 +398,7 @@ const App = () => {
 
         while (attempts < maxAttempts) {
             try {
-                const prompt = `Given the skill "${newSkillInput.trim()}", identify the single most appropriate broad category from this list: [${broadCategories.join(', ')}, Other]. Then, identify one specific sub-category within that broad category that best fits the skill. Provide the response as a JSON object with 'broadCategory' and 'subCategory' keys. Example: {"broadCategory": "Creative & Design", "subCategory": "Music Production"}`;
+                const prompt = `Given the skill "${newSkillInput.trim()}", identify the single most appropriate broad category from this list: [${broadCategories.join(', ')}]. Then, identify one specific sub-category within that broad category that best fits the skill. Provide the response as a JSON object with 'broadCategory' and 'subCategory' keys. If the skill doesn't fit any provided broad category, assign 'Other' as broadCategory and 'Uncategorized' as subCategory. Example: {"broadCategory": "Creative & Design", "subCategory": "Music Production"}`;
                 const chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
                 const payload = {
                     contents: chatHistory,
@@ -415,16 +432,14 @@ const App = () => {
                     targetSubCategory = parsedJson.subCategory;
 
                     // If a suggested broad category isn't already selected, add it (or the custom 'Other' if it's new)
-                    if (!selectedBroadCategories.includes(targetBroadCategory) && targetBroadCategory !== 'Other' && !broadCategories.includes(targetBroadCategory)) {
+                    if (targetBroadCategory === 'Other') {
+                        targetBroadCategory = `Other_Auto_Uncategorized`; // Prefix for auto-categorized 'Other'
+                        targetSubCategory = parsedJson.subCategory || 'General'; // Use Gemini's subcat or default
+                        if (!selectedBroadCategories.includes('Other')) {
+                            setSelectedBroadCategories(prev => [...prev, 'Other']); // Keep 'Other' checkbox checked
+                        }
+                    } else if (!selectedBroadCategories.includes(targetBroadCategory)) {
                         setSelectedBroadCategories(prev => [...prev, targetBroadCategory]);
-                    } else if (targetBroadCategory === 'Other' && !selectedBroadCategories.includes('Other')) {
-                        // If Gemini suggests "Other" and it's not checked, check it.
-                        setSelectedBroadCategories(prev => [...prev, 'Other']);
-                    }
-
-                    // For 'Other' categories identified by Gemini, we should prepend a marker to ensure uniqueness in state keys
-                    if (targetBroadCategory === 'Other' && !broadCategories.includes(targetBroadCategory)) {
-                        targetBroadCategory = `Other_Auto_${targetBroadCategory}`;
                     }
 
                     break; // Success, exit loop
@@ -438,10 +453,10 @@ const App = () => {
                     const delay = baseDelay * Math.pow(2, attempts - 1);
                     await new Promise(res => setTimeout(res, delay));
                 }
-                // If auto-categorization fails after retries, default to 'Other' -> 'Uncategorized'
+                // If auto-categorization fails after retries, default to a generic 'Other' -> 'Uncategorized'
                 if (attempts === maxAttempts) {
-                    targetBroadCategory = 'Other';
-                    targetSubCategory = 'Uncategorized';
+                    targetBroadCategory = 'Other_Auto_Uncategorized'; // Explicitly mark as auto-uncategorized
+                    targetSubCategory = 'General';
                     if (!selectedBroadCategories.includes('Other')) {
                         setSelectedBroadCategories(prev => [...prev, 'Other']);
                     }
@@ -451,21 +466,20 @@ const App = () => {
         setLoadingAutoCategorization(false);
     }
 
-    // Ensure we have a target category structure
+    // Ensure we have a target category structure after all attempts
     if (!targetBroadCategory) {
-        // If still no category (e.g., user clicked add without input and no auto-categorization occurred)
         console.warn('Cannot add skill: No broad category selected or auto-categorized.');
+        setNewSkillInput('');
+        setSelectedSuggestedSkill('');
         return;
     }
     if (!targetSubCategory) {
-        // If sub-category is missing, default to 'General'
-        targetSubCategory = 'General';
+        targetSubCategory = 'General'; // Fallback for sub-category if still missing
     }
-
 
     // Prevent duplicate skills within the same sub-category
     if (skillsByCategory[targetBroadCategory]?.[targetSubCategory]?.includes(skillToAdd)) {
-        console.warn(`Skill "${skillToAdd}" already exists in "${targetBroadCategory}" -> "${targetSubCategory}".`);
+        console.warn(`Skill "${skillToAdd}" already exists in "${formatCategoryForDisplay(targetBroadCategory)}" -> "${targetSubCategory}".`);
         setNewSkillInput('');
         setSelectedSuggestedSkill('');
         return;
@@ -498,9 +512,9 @@ const App = () => {
       if (Object.keys(newBroadCatState).length === 0) {
         const newState = { ...prev };
         delete newState[broadCat];
-        // Also remove from selectedBroadCategories if it was custom
+        // Also remove from selectedBroadCategories if it was custom/auto-categorized
         if (broadCat.startsWith('Other_Custom_') || broadCat.startsWith('Other_Auto_')) {
-            setSelectedBroadCategories(selectedBroadCategories.filter(c => c !== broadCat));
+            setSelectedBroadCategories(selectedBroadCategories.filter(c => c !== broadCat && c !== 'Other')); // Ensure 'Other' is unchecked if all custom/auto categories are gone
         } else { // Remove from selected if it's a standard category and all its skills are gone
              if (broadCategories.includes(broadCat)) {
                 setSelectedBroadCategories(selectedBroadCategories.filter(c => c !== broadCat));
@@ -517,8 +531,11 @@ const App = () => {
       if (catKey.startsWith('Other_Custom_')) {
           return `Custom: ${catKey.replace('Other_Custom_', '')}`;
       }
+      if (catKey.startsWith('Other_Auto_Uncategorized')) {
+          return `Auto-Uncategorized`;
+      }
       if (catKey.startsWith('Other_Auto_')) {
-          return `Auto-categorized: ${catKey.replace('Other_Auto_', '')}`;
+          return `Auto-Categorized: ${catKey.replace('Other_Auto_', '')}`;
       }
       return catKey;
   }
@@ -594,14 +611,14 @@ const App = () => {
                 className="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline focus:border-blue-500"
               >
                 <option value="">-- Select Broad Category --</option>
-                {selectedBroadCategories.filter(cat => !cat.startsWith('Other_Custom_') && !cat.startsWith('Other_Auto_')).map((category) => (
+                {selectedBroadCategories.filter(cat => !cat.startsWith('Other_Custom_') && !cat.startsWith('Other_Auto_Uncategorized')).map((category) => (
                   <option key={category} value={category}>
                     {category}
                   </option>
                 ))}
                 {/* Also include custom/auto-categorized broad categories that have skills */}
                 {Object.keys(skillsByCategory)
-                    .filter(cat => (cat.startsWith('Other_Custom_') || cat.startsWith('Other_Auto_')) && !selectedBroadCategories.includes(cat))
+                    .filter(cat => (cat.startsWith('Other_Custom_') || cat.startsWith('Other_Auto_Uncategorized')) && !selectedBroadCategories.includes(cat))
                     .map(customCat => (
                         <option key={customCat} value={customCat}>
                             {formatCategoryForDisplay(customCat)}
@@ -627,7 +644,7 @@ const App = () => {
               </div>
             )}
 
-            {(activeBroadCategory && activeBroadCategory !== 'Other' || (activeBroadCategory === 'Other' && newCustomBroadCategory.trim() !== '')) && (
+            {((activeBroadCategory && activeBroadCategory !== 'Other') || (activeBroadCategory === 'Other' && newCustomBroadCategory.trim() !== '')) && (
               <>
                 {/* Select Sub-Category Dropdown */}
                 {loadingSubCategories ? (
@@ -636,7 +653,7 @@ const App = () => {
                   suggestedSubCategories.length > 0 && (
                     <div className="mb-4">
                       <label htmlFor="selectSubCategory" className="block text-gray-700 text-sm font-bold mb-2">
-                        Choose a sub-category for {formatCategoryForDisplay(activeBroadCategory === 'Other' && newCustomBroadCategory.trim() !== '' ? newCustomBroadCategory : activeBroadCategory)}:
+                        Choose a sub-category for {formatCategoryForDisplay((activeBroadCategory === 'Other' && newCustomBroadCategory.trim() !== '') ? newCustomBroadCategory : activeBroadCategory)}:
                       </label>
                       <select
                         id="selectSubCategory"
@@ -657,7 +674,7 @@ const App = () => {
 
                 {/* Enter Custom Skill OR Select Suggested Skill */}
                 <div className="mb-4 text-center text-gray-500">
-                  {suggestedSubCategories.length > 0 && activeSubCategory ? (
+                  {((suggestedSubCategories.length > 0) && activeSubCategory) ? (
                     <>
                       {loadingSpecificSkills ? (
                         <div className="text-center text-gray-500 my-4">Loading specific skills...</div>
@@ -784,3 +801,4 @@ const App = () => {
 };
 
 export default App;
+
