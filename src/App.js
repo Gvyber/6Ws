@@ -140,7 +140,7 @@ const App = () => {
     });
 
     return () => unsubscribe();
-  }, [isAuthReady, db, userId, selectedBroadCategories, broadCategories]); // Added broadCategories to dependencies
+  }, [isAuthReady, db, userId, selectedBroadCategories, canvasAppId]); // Added canvasAppId to dependencies and broadCategories removed for consistency after it being global
 
   useEffect(() => {
     if (isInitialMount.current) {
@@ -190,9 +190,86 @@ const App = () => {
     return () => {
       clearTimeout(handler);
     };
-  }, [skillsByCategory, isAuthReady, db, userId]);
+  }, [skillsByCategory, isAuthReady, db, userId, canvasAppId]); // Added canvasAppId to dependencies
 
   // --- Gemini API Calls ---
+
+  // Helper function for auto-categorization
+  const autoCategorizeSkill = async (skillInput) => {
+    setLoadingAutoCategorization(true);
+    let targetBroadCategory = '';
+    let targetSubCategory = '';
+    let attempts = 0;
+    const maxAttempts = 5;
+    const baseDelay = 1000;
+
+    while (attempts < maxAttempts) {
+      try {
+        const prompt = `Given the skill "${skillInput}", identify the single most appropriate broad category from this list: [${broadCategories.join(', ')}]. Then, identify one specific sub-category within that broad category that best fits the skill. Provide the response as a JSON object with 'broadCategory' and 'subCategory' keys. If the skill doesn't fit any provided broad category, assign 'Other' as broadCategory and 'Uncategorized' as subCategory. Example: {"broadCategory": "Creative & Design", "subCategory": "Music Production"}`;
+        const chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
+        const payload = {
+            contents: chatHistory,
+            generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: "OBJECT",
+                    properties: {
+                        broadCategory: { "type": "STRING" },
+                        subCategory: { "type": "STRING" }
+                    }
+                }
+            }
+        };
+        const apiKey = ""; // API key provided by Canvas runtime
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+        const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        const result = await response.json();
+
+        if (result.candidates && result.candidates.length > 0 && result.candidates[0].content && result.candidates[0].content.parts && result.candidates[0].content.parts.length > 0) {
+            const jsonString = result.candidates[0].content.parts[0].text;
+            const parsedJson = JSON.parse(jsonString);
+            targetBroadCategory = parsedJson.broadCategory;
+            targetSubCategory = parsedJson.subCategory;
+
+            if (targetBroadCategory === 'Other') {
+                targetBroadCategory = `Other_Auto_Uncategorized`;
+                targetSubCategory = parsedJson.subCategory || 'General';
+                if (!selectedBroadCategories.includes('Other')) {
+                    setSelectedBroadCategories(prev => [...prev, 'Other']);
+                }
+            } else if (!selectedBroadCategories.includes(targetBroadCategory)) {
+                setSelectedBroadCategories(prev => [...prev, targetBroadCategory]);
+            }
+            break;
+        } else {
+            throw new Error("Invalid API response structure or no content for auto-categorization.");
+        }
+      } catch (error) {
+        console.error(`Attempt ${attempts + 1} failed for auto-categorization of skill "${skillInput}":`, error);
+        attempts++;
+        if (attempts < maxAttempts) {
+            const delay = baseDelay * Math.pow(2, attempts - 1);
+            await new Promise(res => setTimeout(res, delay));
+        }
+        if (attempts === maxAttempts) {
+            targetBroadCategory = 'Other_Auto_Uncategorized';
+            targetSubCategory = 'General';
+            if (!selectedBroadCategories.includes('Other')) {
+                setSelectedBroadCategories(prev => [...prev, 'Other']);
+            }
+        }
+      }
+    }
+    setLoadingAutoCategorization(false);
+    return { broadCategory: targetBroadCategory, subCategory: targetSubCategory };
+  };
 
   useEffect(() => {
     const fetchSubCategories = async (category) => {
@@ -244,7 +321,7 @@ const App = () => {
     };
 
     fetchSubCategories(activeBroadCategory);
-  }, [activeBroadCategory, broadCategories]); // Added broadCategories to dependencies
+  }, [activeBroadCategory]); // broadCategories removed as it's a global constant
 
   useEffect(() => {
     const fetchSpecificSkills = async (broadCat, subCat) => {
@@ -355,103 +432,37 @@ const App = () => {
 
     if (skillToAdd === '') return;
 
-    let currentTargetBroadCategory = activeBroadCategory; // Use a local variable to avoid direct state mutation issues in async ops
-    let currentTargetSubCategory = activeSubCategory;
+    let finalBroadCategory = activeBroadCategory; // Renamed to avoid confusion with internal loop variables
+    let finalSubCategory = activeSubCategory;
 
     if (activeBroadCategory === 'Other' && newCustomBroadCategory.trim() !== '') {
-        currentTargetBroadCategory = `Other_Custom_${newCustomBroadCategory.trim()}`;
-        currentTargetSubCategory = 'General';
-         if (!selectedBroadCategories.includes(currentTargetBroadCategory)) {
-            setSelectedBroadCategories(prev => [...prev, currentTargetBroadCategory]);
+        finalBroadCategory = `Other_Custom_${newCustomBroadCategory.trim()}`;
+        finalSubCategory = 'General';
+         if (!selectedBroadCategories.includes(finalBroadCategory)) {
+            setSelectedBroadCategories(prev => [...prev, finalBroadCategory]);
         }
     }
 
-    if ((!currentTargetBroadCategory || currentTargetBroadCategory === 'Other') && newSkillInput.trim() !== '' && !loadingAutoCategorization) {
-        setLoadingAutoCategorization(true);
-        let attempts = 0;
-        const maxAttempts = 5;
-        const baseDelay = 1000;
-
-        while (attempts < maxAttempts) {
-            try {
-                const prompt = `Given the skill "${newSkillInput.trim()}", identify the single most appropriate broad category from this list: [${broadCategories.join(', ')}]. Then, identify one specific sub-category within that broad category that best fits the skill. Provide the response as a JSON object with 'broadCategory' and 'subCategory' keys. If the skill doesn't fit any provided broad category, assign 'Other' as broadCategory and 'Uncategorized' as subCategory. Example: {"broadCategory": "Creative & Design", "subCategory": "Music Production"}`;
-                const chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
-                const payload = {
-                    contents: chatHistory,
-                    generationConfig: {
-                        responseMimeType: "application/json",
-                        responseSchema: {
-                            type: "OBJECT",
-                            properties: {
-                                broadCategory: { "type": "STRING" },
-                                subCategory: { "type": "STRING" }
-                            }
-                        }
-                    }
-                };
-                const apiKey = ""; // API key provided by Canvas runtime
-                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
-
-                const response = await fetch(apiUrl, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-
-                if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-                const result = await response.json();
-
-                if (result.candidates && result.candidates.length > 0 && result.candidates[0].content && result.candidates[0].content.parts && result.candidates[0].content.parts.length > 0) {
-                    const jsonString = result.candidates[0].content.parts[0].text;
-                    const parsedJson = JSON.parse(jsonString);
-                    currentTargetBroadCategory = parsedJson.broadCategory;
-                    currentTargetSubCategory = parsedJson.subCategory;
-
-                    if (currentTargetBroadCategory === 'Other') {
-                        currentTargetBroadCategory = `Other_Auto_Uncategorized`;
-                        currentTargetSubCategory = parsedJson.subCategory || 'General';
-                        if (!selectedBroadCategories.includes('Other')) {
-                            setSelectedBroadCategories(prev => [...prev, 'Other']);
-                        }
-                    } else if (!selectedBroadCategories.includes(currentTargetBroadCategory)) {
-                        setSelectedBroadCategories(prev => [...prev, currentTargetBroadCategory]);
-                    }
-
-                    break;
-                } else {
-                    throw new Error("Invalid API response structure or no content for auto-categorization.");
-                }
-            } catch (error) {
-                console.error(`Attempt ${attempts + 1} failed for auto-categorization of skill "${newSkillInput.trim()}":`, error);
-                attempts++;
-                if (attempts < maxAttempts) {
-                    const delay = baseDelay * Math.pow(2, attempts - 1);
-                    await new Promise(res => setTimeout(res, delay));
-                }
-                if (attempts === maxAttempts) {
-                    currentTargetBroadCategory = 'Other_Auto_Uncategorized';
-                    currentTargetSubCategory = 'General';
-                    if (!selectedBroadCategories.includes('Other')) {
-                        setSelectedBroadCategories(prev => [...prev, 'Other']);
-                    }
-                }
-            }
-        }
-        setLoadingAutoCategorization(false);
+    // Auto-categorize if no broad or sub-category is selected for the input skill
+    // and if the input skill is not empty
+    if ((!finalBroadCategory || finalBroadCategory === 'Other') && newSkillInput.trim() !== '' && !loadingAutoCategorization) {
+        const { broadCategory: autoBroadCat, subCategory: autoSubCat } = await autoCategorizeSkill(newSkillInput.trim());
+        finalBroadCategory = autoBroadCat;
+        finalSubCategory = autoSubCat;
     }
 
-    if (!currentTargetBroadCategory) {
+    if (!finalBroadCategory) {
         console.warn('Cannot add skill: No broad category selected or auto-categorized.');
         setNewSkillInput('');
         setSelectedSuggestedSkill('');
         return;
     }
-    if (!currentTargetSubCategory) {
-        currentTargetSubCategory = 'General';
+    if (!finalSubCategory) {
+        finalSubCategory = 'General';
     }
 
-    if (skillsByCategory[currentTargetBroadCategory]?.[currentTargetSubCategory]?.includes(skillToAdd)) {
-        console.warn(`Skill "${skillToAdd}" already exists in "${formatCategoryForDisplay(currentTargetBroadCategory)}" -> "${currentTargetSubCategory}".`);
+    if (skillsByCategory[finalBroadCategory]?.[finalSubCategory]?.includes(skillToAdd)) {
+        console.warn(`Skill "${skillToAdd}" already exists in "${formatCategoryForDisplay(finalBroadCategory)}" -> "${finalSubCategory}".`);
         setNewSkillInput('');
         setSelectedSuggestedSkill('');
         return;
@@ -459,9 +470,9 @@ const App = () => {
 
     setSkillsByCategory((prev) => ({
       ...prev,
-      [currentTargetBroadCategory]: {
-        ...(prev[currentTargetBroadCategory] || {}),
-        [currentTargetSubCategory]: [...(prev[currentTargetBroadCategory]?.[currentTargetSubCategory] || []), skillToAdd],
+      [finalBroadCategory]: {
+        ...(prev[finalBroadCategory] || {}),
+        [finalSubCategory]: [...(prev[finalBroadCategory]?.[finalSubCategory] || []), skillToAdd],
       },
     }));
 
